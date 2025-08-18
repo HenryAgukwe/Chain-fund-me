@@ -204,9 +204,14 @@
 
 ;; Helper function to verify campaign
 (define-private (verify-campaign (campaign-id uint) (verifier principal))
-  (map-set campaign-verified campaign-id true)
-  (map-set campaign-verification-records campaign-id verifier)
-  (ok u0)
+  (if (not (campaign-exists? campaign-id))
+    (err ERR-CAMPAIGN-NOT-FOUND)
+    (begin
+      (map-set campaign-verified campaign-id true)
+      (map-set campaign-verification-records campaign-id verifier)
+      (ok u0)
+    )
+  )
 )
 
 ;; =============================================================================
@@ -287,9 +292,11 @@
           (map-set campaign-raised campaign-id new-total)
           
           ;; Update user contribution and campaign contributors count
-          (let ((new-user-total (update-user-contribution contributor campaign-id contribution-amount))
-                (user-contribution (get-user-contribution contributor campaign-id)))
-            (if (is-eq user-contribution contribution-amount)
+          (let (
+                (user-contribution-before (get-user-contribution contributor campaign-id))
+                (new-user-total (update-user-contribution contributor campaign-id contribution-amount))
+               )
+            (if (is-eq user-contribution-before u0)
               (update-campaign-contributors campaign-id)
               u0
             )
@@ -301,8 +308,8 @@
           
           ;; Check if goal is reached after this contribution
           (if (>= new-total goal)
-            (begin (map-set campaign-status campaign-id CAMPAIGN-STATUS-SUCCESSFUL) (ok u0))
-            (ok u0)
+            (begin (map-set campaign-status campaign-id CAMPAIGN-STATUS-SUCCESSFUL) u0)
+            u0
           )
           
           (ok (tuple
@@ -328,8 +335,10 @@
     (try! (if (not (is-eq tx-sender creator)) (err ERR-UNAUTHORIZED) (ok u0)))
     
     ;; Check if campaign is already completed
-    (let ((completed (unwrap! (map-get? campaign-completed campaign-id) false)))
-      (try! (if completed (err ERR-CAMPAIGN-ALREADY-CANCELLED) (ok u0)))
+    (let ((completed-flag (map-get? campaign-completed campaign-id)))
+      (try! (if (and (is-some completed-flag) (unwrap-panic completed-flag))
+               (err ERR-CAMPAIGN-ALREADY-CANCELLED)
+               (ok u0)))
     )
     
     ;; Update campaign status if needed
@@ -339,10 +348,9 @@
     (map-set campaign-completed campaign-id true)
     
     ;; Release funds to beneficiary if successful
-    (if (is-eq status CAMPAIGN-STATUS-SUCCESSFUL)
-      (stx-transfer? raised tx-sender beneficiary)
-      (ok u0)
-    )
+    (try! (if (is-eq status CAMPAIGN-STATUS-SUCCESSFUL)
+             (stx-transfer? raised tx-sender beneficiary)
+             (ok false)))
     
     (ok (tuple
       (status status)
@@ -361,10 +369,11 @@
     (try! (if (not (is-eq tx-sender creator)) (err ERR-UNAUTHORIZED) (ok u0)))
     
     ;; Check if campaign is already cancelled or completed
-    (let ((completed (unwrap! (map-get? campaign-completed campaign-id) false)))
-      (try! (if (is-eq status CAMPAIGN-STATUS-CANCELLED) 
-                 (err ERR-CAMPAIGN-ALREADY-CANCELLED) 
-                 (if completed (err ERR-CAMPAIGN-ALREADY-CANCELLED) (ok u0))))
+    (let ((completed-flag (map-get? campaign-completed campaign-id)))
+      (try! (if (or (is-eq status CAMPAIGN-STATUS-CANCELLED)
+                    (and (is-some completed-flag) (unwrap-panic completed-flag)))
+                 (err ERR-CAMPAIGN-ALREADY-CANCELLED)
+                 (ok u0)))
     )
     
     ;; Update campaign status to cancelled
@@ -386,8 +395,10 @@
     (try! (if (not (campaign-exists? campaign-id)) (err ERR-CAMPAIGN-NOT-FOUND) (ok u0)))
     
     ;; Check if campaign is already verified
-    (let ((is-verified (unwrap! (map-get? campaign-verified campaign-id) false)))
-      (try! (if is-verified (err ERR-CAMPAIGN-ALREADY-EXISTS) (ok u0)))
+    (let ((verified-opt (map-get? campaign-verified campaign-id)))
+      (try! (if (and (is-some verified-opt) (unwrap-panic verified-opt))
+               (err ERR-CAMPAIGN-ALREADY-EXISTS)
+               (ok u0)))
     )
     
     ;; Verify the campaign
@@ -453,7 +464,10 @@
 ;; Get campaign contributors count
 (define-read-only (get-campaign-contributors-count (campaign-id uint))
   (let ((count (map-get? campaign-total-contributors campaign-id)))
-    (ok (unwrap! count u0))
+    (if (is-some count)
+      (ok (unwrap-panic count))
+      (ok u0)
+    )
   )
 )
 
@@ -462,8 +476,8 @@
   (let ((is-verified (map-get? campaign-verified campaign-id))
         (verified-by (map-get? campaign-verification-records campaign-id)))
     (ok (tuple
-      (is-verified (unwrap! is-verified false))
-      (verified-by (unwrap! verified-by tx-sender))
+      (is-verified (if (is-some is-verified) (unwrap-panic is-verified) false))
+      (verified-by (if (is-some verified-by) (unwrap-panic verified-by) tx-sender))
     ))
   )
 )
