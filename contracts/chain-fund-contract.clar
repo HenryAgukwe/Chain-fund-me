@@ -77,6 +77,15 @@
 ;; Contributor amounts
 (define-map contribution-amounts uint uint)
 
+;; User contributions tracking
+(define-map user-contributions principal uint)
+
+;; Campaign total contributors
+(define-map campaign-total-contributors uint uint)
+
+;; Campaign completion tracking
+(define-map campaign-completed uint bool)
+
 ;; Platform statistics
 (define-data-var total-campaigns uint u0)
 (define-data-var total-raised uint u0)
@@ -144,6 +153,49 @@
   (unwrap-panic (map-get? campaign-beneficiaries campaign-id))
 )
 
+;; Helper function to update campaign status
+(define-private (update-campaign-status (campaign-id uint))
+  (let ((status (map-get? campaign-status campaign-id)))
+    (if (is-some status)
+      (let ((current-status (unwrap-panic status)))
+        (if (is-eq current-status CAMPAIGN-STATUS-ACTIVE)
+          (if (has-campaign-ended? campaign-id)
+            (if (is-goal-reached? campaign-id)
+              (begin (map-set campaign-status campaign-id CAMPAIGN-STATUS-SUCCESSFUL) (ok u0))
+              (begin (map-set campaign-status campaign-id CAMPAIGN-STATUS-FAILED) (ok u0))
+            )
+            (ok u0)
+          )
+          (ok u0)
+        )
+      )
+      (err ERR-CAMPAIGN-NOT-FOUND)
+    )
+  )
+)
+
+;; Helper function to get user contribution amount
+(define-private (get-user-contribution (user principal) (campaign-id uint))
+  (unwrap! (map-get? user-contributions user) u0)
+)
+
+;; Helper function to update user contribution
+(define-private (update-user-contribution (user principal) (campaign-id uint) (amount uint))
+  (let ((current-contribution (get-user-contribution user campaign-id))
+        (new-total (+ current-contribution amount)))
+    (map-set user-contributions user new-total)
+    new-total
+  )
+)
+
+;; Helper function to update campaign total contributors
+(define-private (update-campaign-contributors (campaign-id uint))
+  (let ((current-contributors (unwrap! (map-get? campaign-total-contributors campaign-id) u0)))
+    (map-set campaign-total-contributors campaign-id (+ current-contributors u1))
+    (+ current-contributors u1)
+  )
+)
+
 ;; =============================================================================
 ;; PUBLIC FUNCTIONS
 ;; =============================================================================
@@ -181,11 +233,108 @@
     (map-set campaign-categories campaign-id category)
     (map-set campaign-beneficiaries campaign-id beneficiary)
     (map-set campaign-verified campaign-id false)
+    (map-set campaign-total-contributors campaign-id u0)
+    (map-set campaign-completed campaign-id false)
     
     ;; Update platform statistics
     (var-set total-campaigns (+ (var-get total-campaigns) u1))
     
     (ok campaign-id)
+  )
+)
+
+;; Contribute to a campaign
+(define-public (contribute (campaign-id uint))
+  (let ((contributor tx-sender))
+    
+    ;; Validate campaign exists and is active
+    (try! (if (not (campaign-exists? campaign-id)) (err ERR-CAMPAIGN-NOT-FOUND) (ok u0)))
+    (try! (if (not (is-campaign-active? campaign-id)) (err ERR-CAMPAIGN-NOT-ACTIVE) (ok u0)))
+    
+    ;; Get contribution amount from transaction
+    (let ((contribution-amount (stx-get-balance tx-sender)))
+      
+      ;; Validate contribution amount
+      (try! (if (< contribution-amount MIN-CONTRIBUTION) (err ERR-INVALID-AMOUNT) (ok u0)))
+      
+      ;; Get current campaign data
+      (let ((current-raised (unwrap-panic (map-get? campaign-raised campaign-id)))
+            (goal (unwrap-panic (map-get? campaign-goals campaign-id))))
+      
+      ;; Check if goal is already reached
+      (try! (if (>= current-raised goal) (err ERR-GOAL-ALREADY-REACHED) (ok u0)))
+      
+      ;; Calculate platform fee
+      (let ((platform-fee (calculate-platform-fee contribution-amount))
+            (net-contribution (- contribution-amount platform-fee))
+            (new-total (+ current-raised net-contribution)))
+        
+        ;; Update campaign raised amount
+        (map-set campaign-raised campaign-id new-total)
+        
+        ;; Update user contribution and campaign contributors count
+        (let ((new-user-total (update-user-contribution contributor campaign-id contribution-amount))
+              (user-contribution (get-user-contribution contributor campaign-id)))
+          (if (is-eq user-contribution contribution-amount)
+            (update-campaign-contributors campaign-id)
+            u0
+          )
+        )
+        
+        ;; Update platform statistics
+        (var-set total-raised (+ (var-get total-raised) net-contribution))
+        (var-set platform-fees (+ (var-get platform-fees) platform-fee))
+        
+        ;; Check if goal is reached after this contribution
+        (if (>= new-total goal)
+          (begin (map-set campaign-status campaign-id CAMPAIGN-STATUS-SUCCESSFUL) (ok u0))
+          (ok u0)
+        )
+        
+        (ok (tuple
+          (contribution-amount contribution-amount)
+          (platform-fee platform-fee)
+          (net-contribution net-contribution)
+          (new-total new-total)
+        ))
+      )
+    )
+  )
+  )
+)
+
+;; Complete campaign and release funds
+(define-public (complete-campaign (campaign-id uint))
+  (let ((creator (get-campaign-creator campaign-id))
+        (beneficiary (get-campaign-beneficiary campaign-id))
+        (status (unwrap-panic (map-get? campaign-status campaign-id)))
+        (raised (unwrap-panic (map-get? campaign-raised campaign-id))))
+    
+    ;; Only creator can complete campaign
+    (try! (if (not (is-eq tx-sender creator)) (err ERR-UNAUTHORIZED) (ok u0)))
+    
+    ;; Check if campaign is already completed
+    (let ((completed (unwrap! (map-get? campaign-completed campaign-id) false)))
+      (try! (if completed (err ERR-CAMPAIGN-ALREADY-CANCELLED) (ok u0)))
+    )
+    
+    ;; Update campaign status if needed
+    (try! (update-campaign-status campaign-id))
+    
+    ;; Mark campaign as completed
+    (map-set campaign-completed campaign-id true)
+    
+    ;; Release funds to beneficiary if successful
+    (if (is-eq status CAMPAIGN-STATUS-SUCCESSFUL)
+      (stx-transfer? raised tx-sender beneficiary)
+      (ok u0)
+    )
+    
+    (ok (tuple
+      (status status)
+      (raised raised)
+      (released (is-eq status CAMPAIGN-STATUS-SUCCESSFUL))
+    ))
   )
 )
 
@@ -230,6 +379,18 @@
 (define-read-only (get-campaign-raised (campaign-id uint))
   (let ((raised (map-get? campaign-raised campaign-id)))
     (ok (unwrap-panic raised))
+  )
+)
+
+;; Get user contribution for a campaign
+(define-read-only (get-user-contribution-amount (user principal) (campaign-id uint))
+  (ok (get-user-contribution user campaign-id))
+)
+
+;; Get campaign contributors count
+(define-read-only (get-campaign-contributors-count (campaign-id uint))
+  (let ((count (map-get? campaign-total-contributors campaign-id)))
+    (ok (unwrap! count u0))
   )
 )
 
