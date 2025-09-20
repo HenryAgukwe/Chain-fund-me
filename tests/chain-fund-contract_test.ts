@@ -513,3 +513,555 @@ Clarinet.test({
         campaignInfo.result.expectErr();
     },
 });
+
+// ============================================================================
+// COMMIT 3: CAMPAIGN LIFECYCLE TESTS
+// ============================================================================
+
+Clarinet.test({
+    name: "Test campaign contribution flow - successful contribution",
+    async fn(chain: Chain, accounts: Map<string, Account>) {
+        const deployer = accounts.get("deployer")!;
+        const creator = accounts.get("wallet_1")!;
+        const beneficiary = accounts.get("wallet_2")!;
+        const contributor = accounts.get("wallet_3")!;
+
+        // Create campaign
+        let createBlock = chain.mineBlock([
+            Tx.contractCall(
+                "chain-fund-contract",
+                "create-campaign",
+                [
+                    types.ascii("Crowdfunding Campaign"),
+                    types.utf8("Help us build amazing software"),
+                    types.uint(1000),
+                    types.uint(30),
+                    types.ascii("Technology"),
+                    types.principal(beneficiary.address)
+                ],
+                creator.address
+            )
+        ]);
+
+        assertEquals(createBlock.receipts.length, 1);
+        assertEquals(createBlock.receipts[0].result.expectOk(), types.uint(1));
+
+        // Make contribution
+        let contributeBlock = chain.mineBlock([
+            Tx.contractCall(
+                "chain-fund-contract",
+                "contribute",
+                [types.uint(1)],
+                contributor.address
+            )
+        ]);
+
+        assertEquals(contributeBlock.receipts.length, 1);
+        assertEquals(contributeBlock.receipts[0].result.expectOk(), types.bool(true));
+
+        // Verify contribution exists
+        let contributionAmount = chain.callReadOnlyFn(
+            "chain-fund-contract",
+            "get-contribution-amount",
+            [types.uint(1), types.principal(contributor.address)],
+            deployer.address
+        );
+
+        assertEquals(contributionAmount.result.expectOk(), types.uint(100));
+    },
+});
+
+Clarinet.test({
+    name: "Test campaign contribution - multiple contributors",
+    async fn(chain: Chain, accounts: Map<string, Account>) {
+        const deployer = accounts.get("deployer")!;
+        const creator = accounts.get("wallet_1")!;
+        const beneficiary = accounts.get("wallet_2")!;
+        const contributor1 = accounts.get("wallet_3")!;
+        const contributor2 = accounts.get("wallet_4")!;
+        const contributor3 = accounts.get("wallet_5")!;
+
+        // Create campaign with higher goal
+        let createBlock = chain.mineBlock([
+            Tx.contractCall(
+                "chain-fund-contract",
+                "create-campaign",
+                [
+                    types.ascii("Multi-Contributor Campaign"),
+                    types.utf8("Campaign with multiple contributors"),
+                    types.uint(5000),
+                    types.uint(45),
+                    types.ascii("Community"),
+                    types.principal(beneficiary.address)
+                ],
+                creator.address
+            )
+        ]);
+
+        assertEquals(createBlock.receipts.length, 1);
+        assertEquals(createBlock.receipts[0].result.expectOk(), types.uint(1));
+
+        // First contribution
+        let contribute1Block = chain.mineBlock([
+            Tx.contractCall(
+                "chain-fund-contract",
+                "contribute",
+                [types.uint(1)],
+                contributor1.address
+            )
+        ]);
+
+        assertEquals(contribute1Block.receipts[0].result.expectOk(), types.bool(true));
+
+        // Second contribution
+        let contribute2Block = chain.mineBlock([
+            Tx.contractCall(
+                "chain-fund-contract",
+                "contribute",
+                [types.uint(1)],
+                contributor2.address
+            )
+        ]);
+
+        assertEquals(contribute2Block.receipts[0].result.expectOk(), types.bool(true));
+
+        // Third contribution
+        let contribute3Block = chain.mineBlock([
+            Tx.contractCall(
+                "chain-fund-contract",
+                "contribute",
+                [types.uint(1)],
+                contributor3.address
+            )
+        ]);
+
+        assertEquals(contribute3Block.receipts[0].result.expectOk(), types.bool(true));
+
+        // Verify total raised amount
+        let totalRaised = chain.callReadOnlyFn(
+            "chain-fund-contract",
+            "get-campaign-total-raised",
+            [types.uint(1)],
+            deployer.address
+        );
+
+        assertEquals(totalRaised.result.expectOk(), types.uint(300));
+
+        // Verify individual contributions
+        let contribution1 = chain.callReadOnlyFn(
+            "chain-fund-contract",
+            "get-contribution-amount",
+            [types.uint(1), types.principal(contributor1.address)],
+            deployer.address
+        );
+
+        assertEquals(contribution1.result.expectOk(), types.uint(100));
+
+        let contribution2 = chain.callReadOnlyFn(
+            "chain-fund-contract",
+            "get-contribution-amount",
+            [types.uint(1), types.principal(contributor2.address)],
+            deployer.address
+        );
+
+        assertEquals(contribution2.result.expectOk(), types.uint(100));
+    },
+});
+
+Clarinet.test({
+    name: "Test campaign contribution - contribute to non-existent campaign",
+    async fn(chain: Chain, accounts: Map<string, Account>) {
+        const contributor = accounts.get("wallet_1")!;
+
+        // Try to contribute to non-existent campaign
+        let contributeBlock = chain.mineBlock([
+            Tx.contractCall(
+                "chain-fund-contract",
+                "contribute",
+                [types.uint(999)],
+                contributor.address
+            )
+        ]);
+
+        assertEquals(contributeBlock.receipts.length, 1);
+        assertEquals(contributeBlock.receipts[0].result.expectErr(), ERR_CAMPAIGN_NOT_FOUND);
+    },
+});
+
+Clarinet.test({
+    name: "Test campaign completion - successful completion",
+    async fn(chain: Chain, accounts: Map<string, Account>) {
+        const deployer = accounts.get("deployer")!;
+        const creator = accounts.get("wallet_1")!;
+        const beneficiary = accounts.get("wallet_2")!;
+        const contributor = accounts.get("wallet_3")!;
+
+        // Create campaign
+        let createBlock = chain.mineBlock([
+            Tx.contractCall(
+                "chain-fund-contract",
+                "create-campaign",
+                [
+                    types.ascii("Completion Test Campaign"),
+                    types.utf8("Testing campaign completion"),
+                    types.uint(200),
+                    types.uint(30),
+                    types.ascii("Testing"),
+                    types.principal(beneficiary.address)
+                ],
+                creator.address
+            )
+        ]);
+
+        assertEquals(createBlock.receipts[0].result.expectOk(), types.uint(1));
+
+        // Make sufficient contributions
+        let contribute1Block = chain.mineBlock([
+            Tx.contractCall(
+                "chain-fund-contract",
+                "contribute",
+                [types.uint(1)],
+                contributor.address
+            )
+        ]);
+
+        assertEquals(contribute1Block.receipts[0].result.expectOk(), types.bool(true));
+
+        let contribute2Block = chain.mineBlock([
+            Tx.contractCall(
+                "chain-fund-contract",
+                "contribute",
+                [types.uint(1)],
+                creator.address
+            )
+        ]);
+
+        assertEquals(contribute2Block.receipts[0].result.expectOk(), types.bool(true));
+
+        // Complete campaign (should meet goal with 200+ raised)
+        let completeBlock = chain.mineBlock([
+            Tx.contractCall(
+                "chain-fund-contract",
+                "complete-campaign",
+                [types.uint(1)],
+                creator.address
+            )
+        ]);
+
+        assertEquals(completeBlock.receipts[0].result.expectOk(), types.bool(true));
+    },
+});
+
+Clarinet.test({
+    name: "Test campaign completion - unauthorized completion attempt",
+    async fn(chain: Chain, accounts: Map<string, Account>) {
+        const creator = accounts.get("wallet_1")!;
+        const beneficiary = accounts.get("wallet_2")!;
+        const unauthorized = accounts.get("wallet_3")!;
+
+        // Create campaign
+        let createBlock = chain.mineBlock([
+            Tx.contractCall(
+                "chain-fund-contract",
+                "create-campaign",
+                [
+                    types.ascii("Auth Test Campaign"),
+                    types.utf8("Testing completion authorization"),
+                    types.uint(500),
+                    types.uint(30),
+                    types.ascii("Security"),
+                    types.principal(beneficiary.address)
+                ],
+                creator.address
+            )
+        ]);
+
+        assertEquals(createBlock.receipts[0].result.expectOk(), types.uint(1));
+
+        // Try to complete campaign as unauthorized user
+        let completeBlock = chain.mineBlock([
+            Tx.contractCall(
+                "chain-fund-contract",
+                "complete-campaign",
+                [types.uint(1)],
+                unauthorized.address
+            )
+        ]);
+
+        assertEquals(completeBlock.receipts[0].result.expectErr(), ERR_UNAUTHORIZED);
+    },
+});
+
+Clarinet.test({
+    name: "Test campaign cancellation - successful cancellation by creator",
+    async fn(chain: Chain, accounts: Map<string, Account>) {
+        const creator = accounts.get("wallet_1")!;
+        const beneficiary = accounts.get("wallet_2")!;
+
+        // Create campaign
+        let createBlock = chain.mineBlock([
+            Tx.contractCall(
+                "chain-fund-contract",
+                "create-campaign",
+                [
+                    types.ascii("Cancellation Test Campaign"),
+                    types.utf8("Testing campaign cancellation"),
+                    types.uint(1000),
+                    types.uint(30),
+                    types.ascii("Testing"),
+                    types.principal(beneficiary.address)
+                ],
+                creator.address
+            )
+        ]);
+
+        assertEquals(createBlock.receipts[0].result.expectOk(), types.uint(1));
+
+        // Cancel campaign
+        let cancelBlock = chain.mineBlock([
+            Tx.contractCall(
+                "chain-fund-contract",
+                "cancel-campaign",
+                [types.uint(1)],
+                creator.address
+            )
+        ]);
+
+        assertEquals(cancelBlock.receipts[0].result.expectOk(), types.bool(true));
+    },
+});
+
+Clarinet.test({
+    name: "Test campaign cancellation - unauthorized cancellation attempt",
+    async fn(chain: Chain, accounts: Map<string, Account>) {
+        const creator = accounts.get("wallet_1")!;
+        const beneficiary = accounts.get("wallet_2")!;
+        const unauthorized = accounts.get("wallet_3")!;
+
+        // Create campaign
+        let createBlock = chain.mineBlock([
+            Tx.contractCall(
+                "chain-fund-contract",
+                "create-campaign",
+                [
+                    types.ascii("Auth Cancel Test Campaign"),
+                    types.utf8("Testing cancellation authorization"),
+                    types.uint(800),
+                    types.uint(30),
+                    types.ascii("Security"),
+                    types.principal(beneficiary.address)
+                ],
+                creator.address
+            )
+        ]);
+
+        assertEquals(createBlock.receipts[0].result.expectOk(), types.uint(1));
+
+        // Try to cancel campaign as unauthorized user
+        let cancelBlock = chain.mineBlock([
+            Tx.contractCall(
+                "chain-fund-contract",
+                "cancel-campaign",
+                [types.uint(1)],
+                unauthorized.address
+            )
+        ]);
+
+        assertEquals(cancelBlock.receipts[0].result.expectErr(), ERR_UNAUTHORIZED);
+    },
+});
+
+Clarinet.test({
+    name: "Test campaign verification - successful public verification",
+    async fn(chain: Chain, accounts: Map<string, Account>) {
+        const creator = accounts.get("wallet_1")!;
+        const beneficiary = accounts.get("wallet_2")!;
+        const verifier = accounts.get("wallet_3")!;
+
+        // Create campaign
+        let createBlock = chain.mineBlock([
+            Tx.contractCall(
+                "chain-fund-contract",
+                "create-campaign",
+                [
+                    types.ascii("Verification Test Campaign"),
+                    types.utf8("Testing campaign verification"),
+                    types.uint(600),
+                    types.uint(30),
+                    types.ascii("Community"),
+                    types.principal(beneficiary.address)
+                ],
+                creator.address
+            )
+        ]);
+
+        assertEquals(createBlock.receipts[0].result.expectOk(), types.uint(1));
+
+        // Verify campaign publicly
+        let verifyBlock = chain.mineBlock([
+            Tx.contractCall(
+                "chain-fund-contract",
+                "verify-campaign-public",
+                [types.uint(1)],
+                verifier.address
+            )
+        ]);
+
+        assertEquals(verifyBlock.receipts[0].result.expectOk(), types.bool(true));
+    },
+});
+
+Clarinet.test({
+    name: "Test campaign verification - verify non-existent campaign",
+    async fn(chain: Chain, accounts: Map<string, Account>) {
+        const verifier = accounts.get("wallet_1")!;
+
+        // Try to verify non-existent campaign
+        let verifyBlock = chain.mineBlock([
+            Tx.contractCall(
+                "chain-fund-contract",
+                "verify-campaign-public",
+                [types.uint(999)],
+                verifier.address
+            )
+        ]);
+
+        assertEquals(verifyBlock.receipts[0].result.expectErr(), ERR_CAMPAIGN_NOT_FOUND);
+    },
+});
+
+Clarinet.test({
+    name: "Test contribution refund functionality - after campaign cancellation",
+    async fn(chain: Chain, accounts: Map<string, Account>) {
+        const creator = accounts.get("wallet_1")!;
+        const beneficiary = accounts.get("wallet_2")!;
+        const contributor = accounts.get("wallet_3")!;
+
+        // Create campaign
+        let createBlock = chain.mineBlock([
+            Tx.contractCall(
+                "chain-fund-contract",
+                "create-campaign",
+                [
+                    types.ascii("Refund Test Campaign"),
+                    types.utf8("Testing contribution refunds"),
+                    types.uint(1000),
+                    types.uint(30),
+                    types.ascii("Testing"),
+                    types.principal(beneficiary.address)
+                ],
+                creator.address
+            )
+        ]);
+
+        assertEquals(createBlock.receipts[0].result.expectOk(), types.uint(1));
+
+        // Make contribution
+        let contributeBlock = chain.mineBlock([
+            Tx.contractCall(
+                "chain-fund-contract",
+                "contribute",
+                [types.uint(1)],
+                contributor.address
+            )
+        ]);
+
+        assertEquals(contributeBlock.receipts[0].result.expectOk(), types.bool(true));
+
+        // Verify contribution before cancellation
+        let contributionAmount = chain.callReadOnlyFn(
+            "chain-fund-contract",
+            "get-contribution-amount",
+            [types.uint(1), types.principal(contributor.address)],
+            creator.address
+        );
+
+        assertEquals(contributionAmount.result.expectOk(), types.uint(100));
+
+        // Cancel campaign
+        let cancelBlock = chain.mineBlock([
+            Tx.contractCall(
+                "chain-fund-contract",
+                "cancel-campaign",
+                [types.uint(1)],
+                creator.address
+            )
+        ]);
+
+        assertEquals(cancelBlock.receipts[0].result.expectOk(), types.bool(true));
+    },
+});
+
+Clarinet.test({
+    name: "Test campaign fund release - after successful completion",
+    async fn(chain: Chain, accounts: Map<string, Account>) {
+        const creator = accounts.get("wallet_1")!;
+        const beneficiary = accounts.get("wallet_2")!;
+        const contributor1 = accounts.get("wallet_3")!;
+        const contributor2 = accounts.get("wallet_4")!;
+
+        // Create campaign with lower goal for easier completion
+        let createBlock = chain.mineBlock([
+            Tx.contractCall(
+                "chain-fund-contract",
+                "create-campaign",
+                [
+                    types.ascii("Fund Release Campaign"),
+                    types.utf8("Testing fund release mechanics"),
+                    types.uint(150),
+                    types.uint(30),
+                    types.ascii("Finance"),
+                    types.principal(beneficiary.address)
+                ],
+                creator.address
+            )
+        ]);
+
+        assertEquals(createBlock.receipts[0].result.expectOk(), types.uint(1));
+
+        // Make contributions to meet goal
+        let contribute1Block = chain.mineBlock([
+            Tx.contractCall(
+                "chain-fund-contract",
+                "contribute",
+                [types.uint(1)],
+                contributor1.address
+            )
+        ]);
+
+        assertEquals(contribute1Block.receipts[0].result.expectOk(), types.bool(true));
+
+        let contribute2Block = chain.mineBlock([
+            Tx.contractCall(
+                "chain-fund-contract",
+                "contribute",
+                [types.uint(1)],
+                contributor2.address
+            )
+        ]);
+
+        assertEquals(contribute2Block.receipts[0].result.expectOk(), types.bool(true));
+
+        // Verify total raised meets or exceeds goal
+        let totalRaised = chain.callReadOnlyFn(
+            "chain-fund-contract",
+            "get-campaign-total-raised",
+            [types.uint(1)],
+            creator.address
+        );
+
+        assertEquals(totalRaised.result.expectOk(), types.uint(200));
+
+        // Complete campaign to trigger fund release
+        let completeBlock = chain.mineBlock([
+            Tx.contractCall(
+                "chain-fund-contract",
+                "complete-campaign",
+                [types.uint(1)],
+                creator.address
+            )
+        ]);
+
+        assertEquals(completeBlock.receipts[0].result.expectOk(), types.bool(true));
+    },
+});
